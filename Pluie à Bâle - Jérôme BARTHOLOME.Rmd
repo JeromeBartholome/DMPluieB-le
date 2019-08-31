@@ -1,0 +1,775 @@
+---
+title: "Pluie à Bâle - Jérôme BARTHOLOME"
+author: "JBartholome"
+date: "18/08/2019"
+output: 
+  html_document:
+    number_sections: yes
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(ggplot2)
+library(MASS)
+library(leaps)
+library(tidyverse)
+```
+
+# Introduction
+
+L'objectif du travail mené ci-dessous est de prédire s'il pleuvra à Bâle le lendemain (jour J+1) en ayant à notre disposition diverses valeurs environnementales (Température, Humidité, Pression, Nébulosité, etc.) pour le jour J.
+Ce document présentera l'analyse et les résultats obtenus.
+
+---
+
+# Présentation des données
+
+On dispose de deux jeux de données:
+
+- Le premier, sur lequel on va travailler par la suite se nomme **meteo.train.csv**. Il contient les données environnementales pour la journée ainsi que la présence ou non de pluie le lendemain.
+- Le second, auquel on s'intéressera en dernière partie, se nomme **meteo.test.csv**. Il contient uniquement les données environnementales. 
+
+L'objectif de notre travail est de trouver le meilleur modèle possible sur le premier jeu de données afin de faire une prédiction sur le second.
+
+```{r echo=FALSE}
+meteo.train=read.csv('meteo.train.csv')
+attach(meteo.train)
+```
+
+Regardons plus en détail le jeu de données d'entraînement **meteo.train.csv**.
+Les différentes colonnes sont:
+
+```{r intro1, echo=FALSE}
+names(meteo.train)
+```
+
+Les premières colonnes: X, Year, Month, Day, Hour, Minute ne nous intéresserons pas par la suite et nous les exclurons donc de notre modèle.
+En effet, X est le numéro du jour tandis que les 5 autres données sont temporelles. Nous ne ferons pas d'analyse de série temporelle ici ce qui justifie leur inutilité.
+
+Continuons l'analyse de **meteo.train.csv**
+
+```{r echo=FALSE}
+nbreRow=NROW(meteo.train)
+nbreCol=NCOL(meteo.train)
+```
+
+On dispose de `r nbreRow` observations.
+
+Par ailleurs, le tableau présente `r nbreCol` colonnes.
+Parmi ces dernières, on a déjà expliqué que l'on pouvait mettre de côté les 6 premières. La dernière colonne est *pluie.demain* et contient l'information sur la présence de pluie le lendemain sous forme de boolean (**TRUE**/**FALSE**).
+
+**La variable à expliquer étant binaire, on est dans le cadre de la régression logistique.**
+
+Les 40 colonnes restantes correspondent par conséquent aux variables à notre disposition afin de trouver le meilleur modèle possible. Elles sont toutes numériques.
+Enfin, nous n'avons pas jugé utile de modifier les données à ce stade (pas de données manquantes, pas de meilleur nom pour les colonnes, etc.)
+
+*Note: Le summary de meteo.train n'est pas présenté ici car le nombre de variables étant très élevé, la lisibilité en est fortement réduite.*
+
+Pour terminer, la graphique ci-dessous compte le nombre de jours pluvieux/ non pluvieux par année.
+
+```{r echo=FALSE}
+ggplot(meteo.train, aes(x=Year, fill=pluie.demain)) +
+  labs(title="Répartitions des lendemains pluvieux/non-pluvieux par année",
+       x="Année", y="Nombre observé",
+       fill="Couleur") +
+  geom_bar(col="black", position="dodge") +
+  scale_fill_discrete(labels=c("TRUE" = "Nombre de jours de pluie", "FALSE"="Nombre de jours sans pluie"))
+```
+
+Un graphique similaire pourra être dessiné une fois la prédiction réalisée pour vérifier que les profils ne sont pas trop différents.
+
+---
+
+# Choix de Modèle
+
+La variable à expliquer étant binaire, on se limitera dans la suite de notre analyse à des modèles de régression logistique.
+
+## Modèles sans covariable et saturé
+
+Dans un premier temps, concentrons-nous sur les modèles sans covariable et saturé. Ils feront par la suite office de "cas limites".
+
+Voyons tout d'abord un résumé du modèle sans covariable:
+
+```{r modSansCov, echo=FALSE}
+modelSansCov=glm(pluie.demain~1,
+  family=binomial,
+  data=meteo.train
+)
+sumModelSansCov=summary(modelSansCov)
+print(sumModelSansCov)
+AICmodelSansCov=sumModelSansCov$aic
+```
+
+L'AIC de ce modèle est `r AICmodelSansCov`. On verra par la suite qu'il est très mauvais comparé aux autres modèles envisagés. C'est normal pour le modèle sans covariable.
+
+Ci-dessous, le résumé du modèle saturé.
+
+```{r modSat, echo=FALSE}
+modelSat=glm(pluie.demain~.-X-Hour-Minute-Year-Month-Day,
+  family=binomial,
+  data=meteo.train
+)
+sumModelSat=summary(modelSat)
+print(sumModelSat)
+AICmodelSat=sumModelSat$aic
+```
+
+L'AIC de ce modèle est `r AICmodelSat`. Notre objectif est de trouver un modèle ayant un meilleur AIC que le modèle saturé avec, si possible, moins de variables explicatives. En effet, moins de variable explicative implique moins de données à récolter et par conséquent une prédiction à coût moins élevé.
+
+A ce stade, on peut également calculer l'AIC du modèle **probit** saturé.
+
+```{r modSatProb, echo=FALSE}
+modelSatProb=glm(pluie.demain~.-X-Hour-Minute-Year-Month-Day,
+  family=binomial(link="probit"),
+  data=meteo.train
+)
+sumModelSatProb=summary(modelSatProb)
+print(sumModelSatProb)
+AICmodelSatProb=sumModelSatProb$aic
+```
+
+L'AIC de ce modèle est `r AICmodelSatProb`. Il est très proche de celui du modèle logit saturé (sans surprise!) mais est un peu supérieur. Pour autant on ne se limitera pas au modèle logit dans la suite de notre analyse.
+
+## Modèle Logit optimal obtenu par une méthode pas à pas
+
+### Modèle Logit optimal obtenu par la méthode progressive
+
+Dans cette partie, on va utiliser la fonction step afin d'obtenir le meilleur modèle logit possible. La fonction step compare l'AIC de modèles successivement obtenus par ajout ou retrait d'une covariable. La méthode progressive part du modèle saturé et autorise, à chaque étape, l'ajout ou le retrait d'une covarable.
+
+La commande ci-dessous retourne le modèle optimal.
+```{r eval=FALSE}
+stepProgLogit=step(modelSat,family=binomial, direction="both")
+```
+
+```{r stepProgLogit, include=FALSE, cache=TRUE}
+stepProgLogit=step(modelSat,family=binomial, direction="both")
+```
+
+Ensuite, les commandes ci-dessous permettent respectivement:
+
+```{r summaryProgLogit, cache=TRUE}
+# De visualiser un résumé des étapes suivies par l'algorithme.
+stepProgLogit$anova
+# De récupérer la liste des variables explicatives retenues par le modèle ainsi que la valeur retenue pour l'estimation de leur coefficients respectifs.
+stepProgLogit$coefficients
+# De visualiser le modèle obtenu par cette méthode
+print(stepProgLogit$call)
+```
+
+```{r modelProgLogit, include=FALSE, cache=TRUE}
+modelProgLogit=glm(pluie.demain~
+                     Temperature.daily.mean..2.m.above.gnd.+
+                     Snowfall.amount.raw.daily.sum..sfc.+
+                     Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                     Wind.Direction.daily.mean..10.m.above.gnd.+
+                     Wind.Speed.daily.mean..80.m.above.gnd.+
+                     Wind.Direction.daily.mean..80.m.above.gnd.+
+                     Wind.Speed.daily.mean..900.mb.+
+                     Wind.Direction.daily.mean..900.mb.+
+                     Wind.Gust.daily.mean..sfc.+
+                     Temperature.daily.min..2.m.above.gnd.+
+                     Mean.Sea.Level.Pressure.daily.max..MSL.+
+                     Total.Cloud.Cover.daily.max..sfc.+
+                     Total.Cloud.Cover.daily.min..sfc.+
+                     High.Cloud.Cover.daily.max..high.cld.lay.+
+                     Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                     Low.Cloud.Cover.daily.min..low.cld.lay.+
+                     Wind.Speed.daily.max..10.m.above.gnd.+
+                     Wind.Speed.daily.min..10.m.above.gnd.+
+                     Wind.Speed.daily.min..900.mb., 
+                   family = binomial, 
+                   data = meteo.train)
+AICmodelProgLogit=stepProgLogit$aic
+nbreVarModelProgLogit=modelProgLogit$rank-1
+```
+
+En terme d'interprétation des coefficients, on voit par exemple que le coefficient de la variable **Temperature.daily.mean..2.m.above.gnd.** vaut 0.213448761. Ainsi, quand la Moyenne sur la journée de la température à 2m au-dessus du sol augmente d'une unité,  la probabilité qu'il pleuve le lendemain augmente. Plus précisément, la côte anglaise de l'évènement "il pleuvra demain" est mutipliée par exp(0.213448761).
+
+L'AIC de notre premier modèle **modelProgLogit** est `r AICmodelProgLogit` pour `r nbreVarModelProgLogit` variables explicatives. Il est meilleur que le modèle saturé. Nous pouvons pour l'instant retenir ce modèle.
+
+### Comparaison avec les méthodes backward et forward
+
+Attardons-nous quelques instants sur la fonction step. L'argument *direction* permet de choisir entre les méthode progressive, forward et backward. Nous avons pour l'instant utiliser la méthode progressive. 
+
+```{r include=FALSE, cache=TRUE}
+stepBackLogit=step(glm(pluie.demain~.-X-Hour-Minute-Year-Month-Day,
+                       data=meteo.train, 
+                       family=binomial),
+                   direction="backward")
+AICstepBackLogit=stepBackLogit$aic
+stepForwLogit=step(glm(pluie.demain~1,data=meteo.train, family=binomial),
+     pluie.demain~Temperature.daily.mean..2.m.above.gnd.	+
+       Relative.Humidity.daily.mean..2.m.above.gnd.	+
+       Mean.Sea.Level.Pressure.daily.mean..MSL.	+
+       Total.Precipitation.daily.sum..sfc.	+
+       Snowfall.amount.raw.daily.sum..sfc.	+
+       Total.Cloud.Cover.daily.mean..sfc.	+
+       High.Cloud.Cover.daily.mean..high.cld.lay.	+
+       Medium.Cloud.Cover.daily.mean..mid.cld.lay.	+
+       Low.Cloud.Cover.daily.mean..low.cld.lay.	+
+       Sunshine.Duration.daily.sum..sfc.	+
+       Shortwave.Radiation.daily.sum..sfc.	+
+       Wind.Speed.daily.mean..10.m.above.gnd.	+
+       Wind.Direction.daily.mean..10.m.above.gnd.	+
+       Wind.Speed.daily.mean..80.m.above.gnd.	+
+       Wind.Direction.daily.mean..80.m.above.gnd.	+
+       Wind.Speed.daily.mean..900.mb.	+
+       Wind.Direction.daily.mean..900.mb.	+
+       Wind.Gust.daily.mean..sfc.	+
+       Temperature.daily.max..2.m.above.gnd.	+
+       Temperature.daily.min..2.m.above.gnd.	+
+       Relative.Humidity.daily.max..2.m.above.gnd.	+
+       Relative.Humidity.daily.min..2.m.above.gnd.	+
+       Mean.Sea.Level.Pressure.daily.max..MSL.	+
+       Mean.Sea.Level.Pressure.daily.min..MSL.	+
+       Total.Cloud.Cover.daily.max..sfc.	+
+       Total.Cloud.Cover.daily.min..sfc.	+
+       High.Cloud.Cover.daily.max..high.cld.lay.	+
+       High.Cloud.Cover.daily.min..high.cld.lay.	+
+       Medium.Cloud.Cover.daily.max..mid.cld.lay.	+
+       Medium.Cloud.Cover.daily.min..mid.cld.lay.	+
+       Low.Cloud.Cover.daily.max..low.cld.lay.	+
+       Low.Cloud.Cover.daily.min..low.cld.lay.	+
+       Wind.Speed.daily.max..10.m.above.gnd.	+
+       Wind.Speed.daily.min..10.m.above.gnd.	+
+       Wind.Speed.daily.max..80.m.above.gnd.	+
+       Wind.Speed.daily.min..80.m.above.gnd.	+
+       Wind.Speed.daily.max..900.mb.	+
+       Wind.Speed.daily.min..900.mb.	+
+       Wind.Gust.daily.max..sfc.	+
+       Wind.Gust.daily.min..sfc.,
+     data=meteo.train,
+     direction="forward"
+)
+AICstepForwLogit=stepForwLogit$aic
+```
+
+L'AIC du modèle obtenu avec la méthode Backward est `r AICstepBackLogit`. Il est égal à celui du modèle obtenu avec la méthode Progressive. En rentrant dans le détail on voit que les modèles sont identiques.
+
+L'AIC du modèle obtenu la méthode Forward est `r AICstepForwLogit`. Il est moins bon que celui obtenu avec la méthode Progressive mais le nombre de variables explicatives retenues est plus faible. On ne le retiendra pas par la suite mais il pourrait être retenu si des problématiques de coût de collecte de données étaient en jeu.
+
+## Modèle Probit optimal obtenu par une méthode pas à pas
+
+Dans cette partie, nous allons à nouveau utiliser la fonction step mais allons chercher à obtenir le meilleur modèle probit possible. Nous avons vu dans la partie précédente que la méthode progressive est au moins aussi efficace que les méthodes backward ou forward et nous allons par conséquent nous concentrer sur cette dernière.
+
+La commande ci-dessous retourne le modèle probit optimal.
+
+```{r eval=FALSE}
+stepProgProbit=step(modelSatProb,family=binomial(link="probit"), direction="both")
+```
+
+```{r stepProgProbit, include=FALSE, cache=TRUE}
+stepProgProbit=step(modelSatProb,family=binomial(link="probit"), direction="both")
+```
+
+Ensuite, les commandes ci-dessous permettent respectivement:
+
+```{r modelProgProbit, cache=TRUE}
+# De visualiser un résumé des étapes suivies par l'algorithme.
+stepProgProbit$anova
+# De récupérer la liste des variables explicatives retenues par le modèle ainsi que la valeur retenue pour l'estimation de leur coefficients respectifs.
+stepProgProbit$coefficients
+# De visualiser le modèle obtenu par cette méthode
+print(stepProgProbit$call)
+```
+
+```{r AICmodelProgProbit, include=FALSE, cache=TRUE}
+modelProgProbit=glm(pluie.demain ~ 
+                      Temperature.daily.mean..2.m.above.gnd.+
+                      Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                      Wind.Direction.daily.mean..10.m.above.gnd.+
+                      Wind.Speed.daily.mean..80.m.above.gnd.+
+                      Wind.Direction.daily.mean..80.m.above.gnd.+
+                      Wind.Speed.daily.mean..900.mb.+
+                      Wind.Direction.daily.mean..900.mb.+ Wind.Gust.daily.mean..sfc.+
+                      Temperature.daily.min..2.m.above.gnd.+
+                      Mean.Sea.Level.Pressure.daily.max..MSL.+
+                      Mean.Sea.Level.Pressure.daily.min..MSL.+
+                      Total.Cloud.Cover.daily.max..sfc.+
+                      Total.Cloud.Cover.daily.min..sfc.+
+                      High.Cloud.Cover.daily.max..high.cld.lay.+
+                      Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                      Low.Cloud.Cover.daily.min..low.cld.lay.+
+                      Wind.Speed.daily.max..10.m.above.gnd.+
+                      Wind.Speed.daily.min..10.m.above.gnd. +
+                      Wind.Speed.daily.min..900.mb., 
+                    family = binomial(link = "probit"), 
+                    data = meteo.train)
+AICmodelProgProbit=stepProgProbit$aic
+nbreVarModelProgProbit=modelProgProbit$rank-1
+```
+
+L'AIC du modèle **modelProgProbit** est `r AICmodelProgProbit` pour `r nbreVarModelProgProbit` variables explicatives. Il est un tout petit peu moins bon que l'AIC du modèle logit équivalient **modelProgLogit**. Nous allons tout de même retenir ce modèle pour la suite car les coefficients diffèrent.
+
+## Modèles obtenus par utilisation d'une méthode exhaustive
+
+Notes: 
+
+- La fonction regsubsets sera utilisée par la suite dans cette partie. Mes recherches ne m'ont pas permis de confirmer ou d'infirmer que l'utilisation d'une telle méthode était possible dans le cadre d'une régression logistique.
+- La fonction "bestglm" est mentionnée à de multiples reprises mais son appel dans le cadre binomial se limite à 15 variables explicatives et il ne m'était pas possible de l'utiliser.
+- L'appel à la fonction regsubsets est présenté ici car un des modèles retenus par cette méthode s'est révélé très intéressant.
+
+La fonction regsubsets s'appuie par défaut sur le critère BIC mais d'autres modèles peuvent être obtenus notamment par l'analyse des R2 (peu intéressant), R2 ajusté (peu intéressant dans notre cas également car nous ne sommes pas en régression linéaire gaussienne) mais également le Cp de Mallows.
+
+La commande ci-dessous correspond à l'appel de la fonction regsubsets:
+
+```{r eval=FALSE}
+choix_model=regsubsets(pluie.demain~.-X-Hour-Minute-Year-Month-Day,
+                       family=binomial,
+                       int=T,
+                       nbest=1,
+                       nvmax=40,
+                       method="exhaustive",
+                       data=meteo.train)
+```
+
+```{r choix_model, include=FALSE, cache=TRUE}
+choix_model=regsubsets(pluie.demain~.-X-Hour-Minute-Year-Month-Day,
+                       int=T,
+                       nbest=1,
+                       nvmax=40,
+                       method="exhaustive",
+                       data=meteo.train)
+```
+
+Le résumé de cette fonction n'est que difficilement lisible étant donné le nombre de variables mais graphiquement, les résultats sont plus intéressants.
+
+### Critère R2
+
+Ci-dessous, le résultat obtenu en utilisant comme critère le R2:
+```{r modelR2, align="center", fig.height=8, fig.width=10, echo=FALSE}
+plot(choix_model,scale="r2")
+```
+
+Sans surprise, le modèle retenu est le modèle ayant le plus de variables.
+
+### Critère R2 ajusté
+
+Ci-dessous, le résultat obtenu en utilisant comme critère le R2 ajusté:
+```{r modelAdjR2, align="center", fig.height=8, fig.width=10, echo=FALSE}
+plot(choix_model,scale="adjr2")
+```
+
+Les variables retenues dans ce modèle ne sont pas les mêmes que celles obtenues avec la méthode progressive.
+
+Le modèle est détaillé ci-dessous:
+
+```{r eval=FALSE}
+modelRegSubsetAdjR2=glm(pluie.demain~
+                          Temperature.daily.mean..2.m.above.gnd.+
+                          Mean.Sea.Level.Pressure.daily.mean..MSL.+
+                          Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                          Wind.Direction.daily.mean..10.m.above.gnd.+
+                          Wind.Speed.daily.mean..80.m.above.gnd.+
+                          Wind.Direction.daily.mean..80.m.above.gnd.+
+                          Wind.Direction.daily.mean..900.mb.+
+                          Wind.Gust.daily.mean..sfc.+
+                          Temperature.daily.min..2.m.above.gnd.+
+                          Relative.Humidity.daily.min..2.m.above.gnd.+
+                          Mean.Sea.Level.Pressure.daily.max..MSL.+
+                          Mean.Sea.Level.Pressure.daily.min..MSL.+
+                          Total.Cloud.Cover.daily.max..sfc.+
+                          Total.Cloud.Cover.daily.min..sfc.+
+                          High.Cloud.Cover.daily.max..high.cld.lay.+
+                          Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                          Low.Cloud.Cover.daily.min..low.cld.lay.+
+                          Wind.Speed.daily.max..10.m.above.gnd.+
+                          Wind.Speed.daily.min..10.m.above.gnd.+
+                          Wind.Speed.daily.max..900.mb.+
+                          Wind.Speed.daily.min..900.mb.,
+  family=binomial,
+  data=meteo.train
+)
+```
+
+```{r modelRegSubsetAdjR2, include=FALSE, cache=TRUE}
+modelRegSubsetAdjR2=glm(pluie.demain~
+                          Temperature.daily.mean..2.m.above.gnd.+
+                          Mean.Sea.Level.Pressure.daily.mean..MSL.+
+                          Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                          Wind.Direction.daily.mean..10.m.above.gnd.+
+                          Wind.Speed.daily.mean..80.m.above.gnd.+
+                          Wind.Direction.daily.mean..80.m.above.gnd.+
+                          Wind.Direction.daily.mean..900.mb.+
+                          Wind.Gust.daily.mean..sfc.+
+                          Temperature.daily.min..2.m.above.gnd.+
+                          Relative.Humidity.daily.min..2.m.above.gnd.+
+                          Mean.Sea.Level.Pressure.daily.max..MSL.+
+                          Mean.Sea.Level.Pressure.daily.min..MSL.+
+                          Total.Cloud.Cover.daily.max..sfc.+
+                          Total.Cloud.Cover.daily.min..sfc.+
+                          High.Cloud.Cover.daily.max..high.cld.lay.+
+                          Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                          Low.Cloud.Cover.daily.min..low.cld.lay.+
+                          Wind.Speed.daily.max..10.m.above.gnd.+
+                          Wind.Speed.daily.min..10.m.above.gnd.+
+                          Wind.Speed.daily.max..900.mb.+
+                          Wind.Speed.daily.min..900.mb.,
+  family=binomial,
+  data=meteo.train
+)
+AICmodelRegSubsetAdjR2=modelRegSubsetAdjR2$aic
+modelRegSubsetAdjR2Prob=glm(pluie.demain~
+                          Temperature.daily.mean..2.m.above.gnd.+
+                          Mean.Sea.Level.Pressure.daily.mean..MSL.+
+                          Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                          Wind.Direction.daily.mean..10.m.above.gnd.+
+                          Wind.Speed.daily.mean..80.m.above.gnd.+
+                          Wind.Direction.daily.mean..80.m.above.gnd.+
+                          Wind.Direction.daily.mean..900.mb.+
+                          Wind.Gust.daily.mean..sfc.+
+                          Temperature.daily.min..2.m.above.gnd.+
+                          Relative.Humidity.daily.min..2.m.above.gnd.+
+                          Mean.Sea.Level.Pressure.daily.max..MSL.+
+                          Mean.Sea.Level.Pressure.daily.min..MSL.+
+                          Total.Cloud.Cover.daily.max..sfc.+
+                          Total.Cloud.Cover.daily.min..sfc.+
+                          High.Cloud.Cover.daily.max..high.cld.lay.+
+                          Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                          Low.Cloud.Cover.daily.min..low.cld.lay.+
+                          Wind.Speed.daily.max..10.m.above.gnd.+
+                          Wind.Speed.daily.min..10.m.above.gnd.+
+                          Wind.Speed.daily.max..900.mb.+
+                          Wind.Speed.daily.min..900.mb.,
+  family=binomial(link="probit"),
+  data=meteo.train
+)
+AICmodelRegSubsetAdjR2Prob=modelRegSubsetAdjR2Prob$aic
+```
+
+L'AIC de ce modèle est égal à `r AICmodelRegSubsetAdjR2`. Il est moins bon que l'AIC du modèle logit obtenu avec la méthode progressive. On ne le gardera pas.
+De la même manière l'AIC du modèle équivalent Probit vaut `r AICmodelRegSubsetAdjR2Prob`. On le gardera pas non plus.
+
+
+### Critère Cp de Mallow
+
+Ci-dessous, le résultat obtenu en utilisant comme critère le Cp de Mallow:
+```{r modelCpMallow, align="center", fig.height=8, fig.width=10, echo=FALSE}
+plot(choix_model,scale="Cp")
+```
+
+Le modèle est détaillé ci-dessous:
+
+```{r eval=FALSE}
+modelRegSubsetCp=glm(pluie.demain~
+                       Temperature.daily.mean..2.m.above.gnd.+
+                       Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                       Wind.Speed.daily.mean..80.m.above.gnd.+
+                       Wind.Direction.daily.mean..900.mb.+
+                       Temperature.daily.min..2.m.above.gnd.+
+                       Mean.Sea.Level.Pressure.daily.max..MSL.+
+                       Mean.Sea.Level.Pressure.daily.min..MSL.+
+                       Total.Cloud.Cover.daily.max..sfc.+
+                       Total.Cloud.Cover.daily.min..sfc.+
+                       High.Cloud.Cover.daily.max..high.cld.lay.+
+                       Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                       Low.Cloud.Cover.daily.min..low.cld.lay.+
+                       Wind.Speed.daily.min..10.m.above.gnd.+
+                       Wind.Speed.daily.max..900.mb.+
+                       Wind.Gust.daily.max..sfc.,
+                     family=binomial,
+                     data=meteo.train
+)
+```
+
+```{r modelRegSubsetCp, include=FALSE, cache=TRUE}
+modelRegSubsetCp=glm(pluie.demain~
+                       Temperature.daily.mean..2.m.above.gnd.+
+                       Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                       Wind.Speed.daily.mean..80.m.above.gnd.+
+                       Wind.Direction.daily.mean..900.mb.+
+                       Temperature.daily.min..2.m.above.gnd.+
+                       Mean.Sea.Level.Pressure.daily.max..MSL.+
+                       Mean.Sea.Level.Pressure.daily.min..MSL.+
+                       Total.Cloud.Cover.daily.max..sfc.+
+                       Total.Cloud.Cover.daily.min..sfc.+
+                       High.Cloud.Cover.daily.max..high.cld.lay.+
+                       Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                       Low.Cloud.Cover.daily.min..low.cld.lay.+
+                       Wind.Speed.daily.min..10.m.above.gnd.+
+                       Wind.Speed.daily.max..900.mb.+
+                       Wind.Gust.daily.max..sfc.,
+                     family=binomial,
+                     data=meteo.train
+)
+AICmodelRegSubsetCp=modelRegSubsetCp$aic
+modelRegSubsetCpProb=glm(pluie.demain~
+                       Temperature.daily.mean..2.m.above.gnd.+
+                       Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                       Wind.Speed.daily.mean..80.m.above.gnd.+
+                       Wind.Direction.daily.mean..900.mb.+
+                       Temperature.daily.min..2.m.above.gnd.+
+                       Mean.Sea.Level.Pressure.daily.max..MSL.+
+                       Mean.Sea.Level.Pressure.daily.min..MSL.+
+                       Total.Cloud.Cover.daily.max..sfc.+
+                       Total.Cloud.Cover.daily.min..sfc.+
+                       High.Cloud.Cover.daily.max..high.cld.lay.+
+                       Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                       Low.Cloud.Cover.daily.min..low.cld.lay.+
+                       Wind.Speed.daily.min..10.m.above.gnd.+
+                       Wind.Speed.daily.max..900.mb.+
+                       Wind.Gust.daily.max..sfc.,
+                     family=binomial(link="probit"),
+                     data=meteo.train
+)
+AICmodelRegSubsetCpProb=modelRegSubsetCpProb$aic
+nbreVarModelRegSubsetCpProb=modelRegSubsetCpProb$rank-1
+```
+
+L'AIC de ce modèle est égal à `r AICmodelRegSubsetCp` pour `r nbreVarModelRegSubsetCpProb` variables explicatives. Il est meilleur que l'AIC obtenu avec la méthode progressive tout en ayant moins de variables explicatives. C'est notre meilleur modèle jusqu'à présent. On le garde.
+L'AIC du modèle équivalent Probit vaut `r AICmodelRegSubsetCpProb`. Il est moins bon que l'AIC précédent. On ne garde pas ce modèle.
+
+*Note: L'utilisation du critère de Mallow dans le cadre de la regression logistique n'est pas forcément évidente. Cependant, le document accessible à l'adresse suivante (http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.544.4177&rep=rep1&type=pdf) me laisse penser que son utilisation est possible.*
+
+### Critère BIC
+
+Ci-dessous, le résultat obtenu en utilisant le critère BIC:
+```{r modelBic, align="center", fig.height=8, fig.width=10, echo=FALSE}
+plot(choix_model,scale="bic")
+```
+
+Le modèle est détaillé ci-dessous:
+
+```{r eval=FALSE}
+modelRegSubsetBIC=glm(pluie.demain~
+                        High.Cloud.Cover.daily.mean..high.cld.lay.+
+                        Wind.Direction.daily.mean..900.mb.+
+                        Mean.Sea.Level.Pressure.daily.min..MSL.+
+                        Medium.Cloud.Cover.daily.max..mid.cld.lay.,
+                     family=binomial,
+                     data=meteo.train
+)
+```
+
+```{r modelRegSubsetBic, include=FALSE, cache=TRUE}
+modelRegSubsetBIC=glm(pluie.demain~
+                        High.Cloud.Cover.daily.mean..high.cld.lay.+
+                        Wind.Direction.daily.mean..900.mb.+
+                        Mean.Sea.Level.Pressure.daily.min..MSL.+
+                        Medium.Cloud.Cover.daily.max..mid.cld.lay.,
+                     family=binomial,
+                     data=meteo.train
+)
+AICmodelRegSubsetBic=modelRegSubsetBIC$aic
+modelRegSubsetBICProb=glm(pluie.demain~
+                        High.Cloud.Cover.daily.mean..high.cld.lay.+
+                        Wind.Direction.daily.mean..900.mb.+
+                        Mean.Sea.Level.Pressure.daily.min..MSL.+
+                        Medium.Cloud.Cover.daily.max..mid.cld.lay.,
+                     family=binomial(link="probit"),
+                     data=meteo.train
+)
+AICmodelRegSubsetBicProb=modelRegSubsetBICProb$aic
+```
+
+L'AIC de ce modèle est égal à `r AICmodelRegSubsetBic`. Il est bien moins bon que les AIC des modèles retenus jusqu'à présent. On ne le garde pas.
+L'AIC du modèle équivalent Probit vaut `r AICmodelRegSubsetBicProb`. On ne garde pas ce modèle non plus.
+
+## Conclusion sur le choix de Modèle.
+
+En conclusion, les modèles suivants sont retenus:
+
+1. Modèle Logit obtenu avec une méthode pas à pas progressive
+2. Modèle Probit obtenu avec une méthode pas à pas progressive
+3. Modèle Logit obtenu avec une méthode exhaustive utilisant le critère Cp de Mallows
+
+Ci-dessous, un tableau récapitulant les principales informations sur ces trois modèles.
+
+```{r tableauRecap, echo=FALSE}
+tableauRecap=tribble(
+  ~Modèle, ~RObject, ~NombreDeCoefficients, ~AIC,
+  "Modèle Logit obtenu avec une méthode pas à pas progressive", "modelProgLogit", nbreVarModelProgLogit, AICmodelProgLogit,
+  "Modèle Probit obtenu avec une méthode pas à pas progressive", "modelProgProbit", nbreVarModelProgProbit, AICmodelProgProbit,
+  "Modèle Logit obtenu avec une méthode exhaustive utilisant le critère Cp de Mallows", "modelRegSubsetCp", nbreVarModelRegSubsetCpProb, AICmodelRegSubsetCp
+)
+knitr::kable(tableauRecap)
+```
+
+# Evaluation de la qualité de nos modèles par la Validation croisée
+
+Afin de départager nos 3 modèles retenus, une validation croisée peut-être implémentée. La méthode de la validation croisée sera expliquée pour le premier modèle. La même méthode sera ensuite appliquée aux autres modèles.
+
+## Validation croisée appliquée au modèle modelProgLogit
+
+A ce niveau, nous allons continuer de nous concentrer sur le fichier d'entraînement.
+On va le scinder en 2 parties aléatoirement. On tire au hasard 80% des données qui correspondront à une nouvelle base d'entraînement. Les 20% restants feront parti de la base de test et seront utilisés pour valider le modèle  obtenu en calculant la moyenne des écarts en valeur absolue.
+Cela correspond à la méthode de validation croisée de type "holdout".
+Le code est ci-dessous:
+
+```{r valCroiséeProgLogit, cache=TRUE}
+#Création du vecteur split de booleens tirés aléatoirement
+split = sample(c(T, F), nrow(meteo.train), replace = T, prob = c(.8, .2))
+# Estimation des paramètres du modèle, en utilisant uniquement la base d'entraînement
+modelProgLogitTest=glm(pluie.demain~
+                     Temperature.daily.mean..2.m.above.gnd.+
+                     Snowfall.amount.raw.daily.sum..sfc.+
+                     Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                     Wind.Direction.daily.mean..10.m.above.gnd.+
+                     Wind.Speed.daily.mean..80.m.above.gnd.+
+                     Wind.Direction.daily.mean..80.m.above.gnd.+
+                     Wind.Speed.daily.mean..900.mb.+
+                     Wind.Direction.daily.mean..900.mb.+
+                     Wind.Gust.daily.mean..sfc.+
+                     Temperature.daily.min..2.m.above.gnd.+
+                     Mean.Sea.Level.Pressure.daily.max..MSL.+
+                     Total.Cloud.Cover.daily.max..sfc.+
+                     Total.Cloud.Cover.daily.min..sfc.+
+                     High.Cloud.Cover.daily.max..high.cld.lay.+
+                     Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                     Low.Cloud.Cover.daily.min..low.cld.lay.+
+                     Wind.Speed.daily.max..10.m.above.gnd.+
+                     Wind.Speed.daily.min..10.m.above.gnd.+
+                     Wind.Speed.daily.min..900.mb., 
+                   family = binomial, 
+                   data = meteo.train[split,])
+# Prédiction sur la base de Test, en utilisant le modèle obtenu précédemment
+predProgLogit = predict(modelProgLogitTest, meteo.train[!split, ], type = "response")
+# Pour finir, on évalue l'erreur de prédiction
+erreurProgLogit=mean(abs(predProgLogit - meteo.train[!split, "pluie.demain"]))
+```
+
+L'erreur obtenue avec le premier modèle modelProgLogit vaut `r erreurProgLogit`.
+
+---
+
+## Validation croisée appliquée au modèle modelProgLogit
+
+On va maintenant appliquer la même méthode aux deux autres modèles retenus.
+Le code étant similaire, on va se concentrer ici sur les erreurs obtenues.
+
+```{r valCroiséeAutres, include=FALSE, cache=TRUE}
+# Estimation des paramètres du modèle Probit, en utilisant uniquement la base d'entraînement
+modelProgProbitTest=glm(pluie.demain~
+                     Temperature.daily.mean..2.m.above.gnd.+
+                      Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                      Wind.Direction.daily.mean..10.m.above.gnd.+
+                      Wind.Speed.daily.mean..80.m.above.gnd.+
+                      Wind.Direction.daily.mean..80.m.above.gnd.+
+                      Wind.Speed.daily.mean..900.mb.+
+                      Wind.Direction.daily.mean..900.mb.+ Wind.Gust.daily.mean..sfc.+
+                      Temperature.daily.min..2.m.above.gnd.+
+                      Mean.Sea.Level.Pressure.daily.max..MSL.+
+                      Mean.Sea.Level.Pressure.daily.min..MSL.+
+                      Total.Cloud.Cover.daily.max..sfc.+
+                      Total.Cloud.Cover.daily.min..sfc.+
+                      High.Cloud.Cover.daily.max..high.cld.lay.+
+                      Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                      Low.Cloud.Cover.daily.min..low.cld.lay.+
+                      Wind.Speed.daily.max..10.m.above.gnd.+
+                      Wind.Speed.daily.min..10.m.above.gnd. +
+                      Wind.Speed.daily.min..900.mb., 
+                    family = binomial(link = "probit"), 
+                    data = meteo.train[split,])
+# Prédiction sur la base de Test, en utilisant le modèle obtenu précédemment
+predProgProbit = predict(modelProgProbitTest, meteo.train[!split, ], type = "response")
+# Pour finir, on évalue l'erreur de prédiction
+erreurProgProbit=mean(abs(predProgProbit - meteo.train[!split, "pluie.demain"]))
+
+# Estimation des paramètres du modèle Cp Mallows, en utilisant uniquement la base d'entraînement
+modelRegSubsetCpTest=glm(pluie.demain~
+                       Temperature.daily.mean..2.m.above.gnd.+
+                       Low.Cloud.Cover.daily.mean..low.cld.lay.+
+                       Wind.Speed.daily.mean..80.m.above.gnd.+
+                       Wind.Direction.daily.mean..900.mb.+
+                       Temperature.daily.min..2.m.above.gnd.+
+                       Mean.Sea.Level.Pressure.daily.max..MSL.+
+                       Mean.Sea.Level.Pressure.daily.min..MSL.+
+                       Total.Cloud.Cover.daily.max..sfc.+
+                       Total.Cloud.Cover.daily.min..sfc.+
+                       High.Cloud.Cover.daily.max..high.cld.lay.+
+                       Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+                       Low.Cloud.Cover.daily.min..low.cld.lay.+
+                       Wind.Speed.daily.min..10.m.above.gnd.+
+                       Wind.Speed.daily.max..900.mb.+
+                       Wind.Gust.daily.max..sfc.,
+                     family=binomial,
+                     data=meteo.train[split,])
+# Prédiction sur la base de Test, en utilisant le modèle obtenu précédemment
+predRegSubsetCp = predict(modelRegSubsetCpTest, meteo.train[!split, ], type = "response")
+# Pour finir, on évalue l'erreur de prédiction
+erreurRegSubsetCp=mean(abs(predRegSubsetCp - meteo.train[!split, "pluie.demain"]))
+```
+
+On obtient respectivement les erreurs suivantes:
+
+- Pour le modèle modelProgProbit: `r erreurProgProbit`.
+- Pour le modèle modelRegSubsetCp: `r erreurRegSubsetCp`.
+
+## Conclusion sur la validation croisée
+
+Le tableau ci-dessous récapitule les informations obtenues sur nos 3 modèles:
+
+```{r tableauRecapFinal, echo=FALSE}
+tableauRecapFinal=tribble(
+  ~Modèle, ~NombreDeCoefficients, ~AIC, ~Erreur,
+  "modelProgLogit", nbreVarModelProgLogit, AICmodelProgLogit, erreurProgLogit,
+  "modelProgProbit", nbreVarModelProgProbit, AICmodelProgProbit, erreurProgProbit,
+  "modelRegSubsetCp", nbreVarModelRegSubsetCpProb, AICmodelRegSubsetCp, erreurRegSubsetCp
+)
+knitr::kable(tableauRecapFinal)
+```
+
+En conclusion, bien que le modèle obtenu par la méthode exhaustive avec le Cp de Mallows ait un AIC (`r AICmodelRegSubsetCp`) inférieur à l'AIC du modèle logit obtenue avec la méthode progressice (`r AICmodelProgLogit`), son erreur est supérieure(`r erreurRegSubsetCp` > `r erreurProgLogit`). On privilégie par conséquent le premier modèle **modelProgLogit** à modelRegSubsetCp.
+Le second modèle modelProgProbit présente un moins bon AIC (`r AICmodelProgProbit`) et une plus grande erreur (`r erreurProgProbit`). Il n'est évidemment pas retenu.
+
+**En conclusion, le modèle retenu pour la prédiction sera le premier modèle Logit obtenu par la méthode pas à pas progressive modelProgLogit.**
+
+A noter qu'une erreur de l'ordre de 0.38 est évidemment très élevée comparée à 1.
+Il faut cependant prendre en compte le fait que sur le fichier d'entraînement, pluie.demain ne peut prendre comme valeur que 0 ou 1 alors que notre prédiction peut prendre tout valeur entre 0 et 1.
+Par ailleurs, une valeur de 0.38, bien qu'élevée, est inférieure à 0.5 ce qui est rassurant. Si l'erreur avait été supérieure à 0.5, alors cela aurait signifié que notre modèle se trompe en moyenne dans plus de la moitié des cas. Ce n'est pas le cas ici.
+
+---
+
+# Prédiction
+
+On va maintenant utiliser le modèle obtenu et vérifié précemment modelProgLogit pour prédire la présence de pluie les lendemains des journées incluses dans le fichier *meteo.test.csv*.
+
+```{r echo=FALSE}
+meteo.test=read.csv('meteo.test.csv')
+```
+
+Le code utilisé pour la prédiction est ci-dessous:
+
+```{r prediction}
+# On crée une colonne dans le fichier meteo.test pour stocker la valeur de nos prédictions.
+meteo.test$pluie.demain.pred.num=predict(modelRegSubsetCp,new=meteo.test,type="response")
+# L'information qui nous intéresse étant binaire, on crée une dernière colonne contenant True ou False
+meteo.test$pluie.demain.pred=T
+meteo.test[meteo.test$pluie.demain.pred.num<0.5,]$pluie.demain.pred=F
+```
+
+Le fichier **meteo.test.predJB.csv** présent sur le dépôt github contient les prédictions.
+
+La commande utilisée pour sauvegarder est ci-dessous:
+
+```{r eval=FALSE}
+write.csv(meteo.test,'meteo.test.predJB.csv')
+```
+
+Enfin, comparons l'allure des graphiques comptant le nombre de jours pluvieux/ non pluvieux par année à Bâle.
+
+```{r echo=FALSE}
+ggplot(meteo.train, aes(x=Year, fill=pluie.demain)) +
+  labs(title="Répartitions des lendemains pluvieux/non-pluvieux par année",
+       x="Année", y="Nombre observé",
+       fill="Couleur", subtitle="Fichier meteo.train.csv") +
+  geom_bar(col="black", position="dodge") +
+  scale_fill_discrete(labels=c("TRUE" = "Nombre de jours de pluie", "FALSE"="Nombre de jours sans pluie"))
+
+ggplot(meteo.test, aes(x=Year, fill=pluie.demain.pred)) +
+  labs(title="Répartitions des lendemains pluvieux/non-pluvieux par année",
+       x="Année", y="Nombre observé",
+       fill="Couleur", subtitle="Fichier meteo.test.csv") +
+  geom_bar(col="black", position="dodge") +
+  scale_fill_discrete(labels=c("TRUE" = "Nombre de jours de pluie", "FALSE"="Nombre de jours sans pluie"))
+```
+
+L'allure des graphiques est sensiblement différente quant à la répartition des jours pluvieux/ non-pluvieux mais ne permet pas pour autant de réfuter la prédiction pour, entre autre, les raisons suivantes:
+
+- Le nombre de jours est différent entre les 2 fichiers et il est fortement possible que la proportion de jours pluvieux soit différente entre les deux.
+- La prédiction en cas de régression logistique est soumise à de plus fortes incertitudes. Des prédictions proches de 0.5 sont par définition de moins bonne qualité puisque l'on arrondit à 0 ou à 1.
+- Il ne semble pas y avoir de résultat ostensiblement aberrant.
